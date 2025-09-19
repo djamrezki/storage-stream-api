@@ -71,14 +71,18 @@ public class LocalFsStorageAdapter implements StoragePort {
     public void delete(String storageKey) throws IOException {
         Path p = resolve(storageKey);
         try {
+            // remove file if present
             Files.deleteIfExists(p);
+
+            // best-effort: clean up up to 2 empty parent dirs
             Path parent = p.getParent();
             for (int i = 0; i < 2 && parent != null && !parent.equals(rootDir); i++) {
                 try {
-                    Files.delete(parent);
+                    // if already missing, stop
+                    if (!Files.deleteIfExists(parent)) break;
                     parent = parent.getParent();
                 } catch (DirectoryNotEmptyException ex) {
-                    break;
+                    break; // stop if it has other content
                 }
             }
         } catch (SecurityException se) {
