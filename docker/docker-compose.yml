@@ -1,0 +1,58 @@
+# ./docker/docker-compose.yml
+version: "3.8"
+
+services:
+  mongo:
+    image: mongo:7
+    container_name: storage-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ ping: 1 }).ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  storage-api:
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"   # keep ~50 MB per container
+    storage_opt:
+      size: "200m"   # may be ignored depending on the storage driver
+    # Build your Spring Boot app image from the repo root Dockerfile
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: storage-api
+    environment:
+      # App → Mongo
+      - MONGODB_URI=mongodb://mongo:27017/storage
+      # Where the storage adapter writes file bytes
+      - STORAGE_PATH=/data/storage
+      # Optional: keep JVM headroom under the 1GB container limit
+      - JAVA_TOOL_OPTIONS=-XX:MaxRAMPercentage=75.0
+    ports:
+      - "8080:8080"
+    depends_on:
+      mongo:
+        condition: service_healthy
+    # Persist large files OUTSIDE the container's writable layer
+    volumes:
+      - storage_data:/data/storage
+    # Memory limit (works in plain Compose)
+    mem_limit: 1g
+    # Swarm-style limit (ignored by plain Compose; useful if you deploy with Swarm)
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    restart: unless-stopped
+
+volumes:
+  mongo_data:
+  storage_data:

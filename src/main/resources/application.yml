@@ -1,0 +1,18 @@
+server:
+  port: 8080
+
+spring:
+  data:
+    mongodb:
+      uri: ${MONGODB_URI:mongodb://localhost:27017/storage}
+      auto-index-creation: true
+  servlet:
+    multipart:
+      # No hard limit required by the brief; set high to avoid surprises
+      max-file-size: 500GB
+      max-request-size: 500GB
+
+storage:
+  base-path: ${STORAGE_PATH:/data/storage} # mount a volume here
+  base-url: /                              # download links must be relative per brief
+  fsync-on-write: false
