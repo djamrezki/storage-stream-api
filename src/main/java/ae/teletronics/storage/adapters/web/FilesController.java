@@ -112,7 +112,6 @@ public class FilesController {
                 p.getNumber(), p.getSize(), p.getTotalElements(), p.getTotalPages());
     }
 
-    // src/main/java/ae/teletronics/storage/adapters/web/FilesController.java
     @GetMapping("/files/all")
     public PageResponse<FileEntryDto> listAll(@RequestHeader("X-User-Id") String userId,
                                               @RequestParam(value = "tag", required = false) String tag,
