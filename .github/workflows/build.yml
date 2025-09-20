@@ -5,10 +5,13 @@ on:
     branches: [ main ]
     tags: [ 'v*' ]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
   packages: write
+
+
 
 concurrency:
   group: ci-${{ github.ref }}
