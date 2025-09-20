@@ -2,6 +2,7 @@ plugins {
     id 'java'
     id 'org.springframework.boot' version '3.3.2'
     id 'io.spring.dependency-management' version '1.1.5'
+    id 'jacopo'
 }
 
 group = 'ae.teletronics'
@@ -37,6 +38,7 @@ tasks.test {
         excludeTags 'integration'
     }
     jvmArgs += ['-Xms256m','-Xmx512m'] // CI-friendly
+    finalizedBy(tasks.jacocoTestReport)
 }
 
 tasks.register('integrationTest', Test) {
@@ -44,8 +46,26 @@ tasks.register('integrationTest', Test) {
         includeTags 'integration'
     }
     shouldRunAfter test
+    finalizedBy(tasks.jacocoTestReport)
 }
 check.dependsOn tasks.named('integrationTest')
+
+tasks.jacocoTestReport {
+    dependsOn(tasks.test, tasks.named('integrationTest'))
+    reports {
+        xml.required = true   // for CI tools
+        html.required = true  // nice to browse locally
+        csv.required = false
+    }
+    // Pick up exec data from all test tasks (Gradle can write .exec or .ec)
+    executionData.from(fileTree(layout.buildDirectory).include(
+            '**/jacoco/*.exec', '**/jacoco/*.ec'
+    ))
+    // Limit to your main source set
+    sourceDirectories.from(files(sourceSets.main.allSource.srcDirs))
+    classDirectories.from(files(sourceSets.main.output))
+}
+
 
 
 // put this at the end of build.gradle
