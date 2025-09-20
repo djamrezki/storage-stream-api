@@ -22,16 +22,14 @@ services:
       options:
         max-size: "10m"
         max-file: "5"   # keep ~50 MB per container
-    storage_opt:
-      size: "200m"   # may be ignored depending on the storage driver
     # Build your Spring Boot app image from the repo root Dockerfile
     build:
       context: ..
-      dockerfile: Dockerfile
+      dockerfile: docker/Dockerfile
     container_name: storage-api
     environment:
       # App → Mongo
-      - MONGODB_URI=mongodb://mongo:27017/storage
+      - SPRING_DATA_MONGODB_URI=mongodb://mongo:27017/storage
       # Where the storage adapter writes file bytes
       - STORAGE_PATH=/data/storage
       # Optional: keep JVM headroom under the 1GB container limit
