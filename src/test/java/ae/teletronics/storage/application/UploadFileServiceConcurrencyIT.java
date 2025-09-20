@@ -96,17 +96,37 @@ class UploadFileServiceConcurrencyIT extends IntegrationTestBase {
         long successes = Arrays.stream(new Object[]{r1, r2}).filter(Objects::nonNull).count();
         assertThat(successes).isEqualTo(1);
 
-        // Storage: two saves, one delete
-        assertThat(storage.savedKeys()).hasSize(2);
-        assertThat(storage.deletes()).hasSize(1);
-        String deletedKey = storage.deletes().get(0);
-        assertThat(deletedKey).isIn(storage.savedKeys());
+        // Storage: either (1 save, 0 deletes) if the loser detected dup pre-save,
+        // or (2 saves, 1 delete) if we saved then rolled back the loser.
+        int saveCount = storage.savedKeys().size();
+        int deleteCount = storage.deletes().size();
 
-        // Surviving key is the other one
-        String survivingKey = storage.savedKeys().get(0).equals(deletedKey)
-                ? storage.savedKeys().get(1)
-                : storage.savedKeys().get(0);
+        // must be either 1 or 2 saves
+        assertThat(saveCount).isIn(1, 2);
+
+        // deletes must be 0 when only 1 save, or 1 when 2 saves
+        if (saveCount == 1) {
+            assertThat(deleteCount).isEqualTo(0);
+        } else {
+            assertThat(deleteCount).isEqualTo(1);
+            String deletedKey = storage.deletes().get(0);
+            assertThat(deletedKey).isIn(storage.savedKeys());
+        }
+
+        // Determine the surviving key
+        final String survivingKey;
+        if (saveCount == 1) {
+            survivingKey = storage.savedKeys().get(0);
+        } else {
+            String deletedKey = storage.deletes().get(0);
+            String k0 = storage.savedKeys().get(0);
+            String k1 = storage.savedKeys().get(1);
+            survivingKey = k0.equals(deletedKey) ? k1 : k0;
+        }
+
+        // The surviving blob must exist
         assertThat(storage.has(survivingKey)).isTrue();
+
 
         // DB must have exactly one FileEntry for this owner/filename (case-insensitive field is filenameLc)
         List<FileEntry> all = files.findAll();
