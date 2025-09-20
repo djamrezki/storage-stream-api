@@ -2,7 +2,7 @@ plugins {
     id 'java'
     id 'org.springframework.boot' version '3.3.2'
     id 'io.spring.dependency-management' version '1.1.5'
-    id 'jacopo'
+    id 'jacoco'
 }
 
 group = 'ae.teletronics'
@@ -65,6 +65,21 @@ tasks.jacocoTestReport {
     sourceDirectories.from(files(sourceSets.main.allSource.srcDirs))
     classDirectories.from(files(sourceSets.main.output))
 }
+
+// Optional: fail the build on low coverage
+// tasks.register('jacocoTestCoverageVerification', JacocoCoverageVerification) {
+//     dependsOn(tasks.jacocoTestReport)
+//     violationRules {
+//         rule {
+//             limit {
+//                 counter = 'INSTRUCTION'
+//                 value = 'COVEREDRATIO'
+//                 minimum = 0.60
+//             }
+//         }
+//     }
+// }
+// tasks.check.dependsOn(tasks.named('jacocoTestCoverageVerification'))
 
 
 
