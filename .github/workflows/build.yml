@@ -62,7 +62,7 @@ jobs:
       - name: Build (and push on main/tags)
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ./docker/
           file: Dockerfile
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
