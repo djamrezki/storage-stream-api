@@ -1,0 +1,335 @@
+openapi: 3.0.3
+info:
+  title: Storage API
+  version: 0.1.0
+  description: |
+    REST API to upload, list, rename, delete, and download files. After a successful
+    upload the service returns a unique, unguessable **relative** download link that
+    works for both PUBLIC and PRIVATE files.
+servers:
+  - url: /
+tags:
+  - name: files
+    description: File metadata operations
+  - name: download
+    description: Download by secure token
+paths:
+  /files:
+    post:
+      tags: [files]
+      operationId: uploadFile
+      summary: Upload a file
+      description: |
+        Uploads a file with filename, visibility and up to 5 tags. If contentType is not
+        provided by the client, the server will attempt to detect it after upload.
+        Duplicate prevention is enforced per-user by filename and content checksum.
+      parameters:
+        - $ref: '#/components/parameters/XUserId'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, filename, visibility]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                filename:
+                  type: string
+                  description: Desired filename for this user (must be unique per user)
+                visibility:
+                  $ref: '#/components/schemas/FileVisibility'
+                tags:
+                  type: array
+                  description: Up to 5 tags; case-insensitive (TAG == tAg). Non-existent tags will be created.
+                  maxItems: 5
+                  items:
+                    type: string
+            encoding:
+              tags:
+                style: form
+                explode: true
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/File'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: Conflict — duplicate by filename or content (per user)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /files/public:
+    get:
+      tags: [files]
+      operationId: listPublicFiles
+      summary: List public files
+      parameters:
+        - $ref: '#/components/parameters/Tag'
+        - $ref: '#/components/parameters/SortBy'
+        - $ref: '#/components/parameters/Asc'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Page'
+  /files/me:
+    get:
+      tags: [files]
+      operationId: listMyFiles
+      summary: List files owned by the requester
+      parameters:
+        - $ref: '#/components/parameters/XUserId'
+        - $ref: '#/components/parameters/Tag'
+        - $ref: '#/components/parameters/SortBy'
+        - $ref: '#/components/parameters/Asc'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Page'
+  /files/all:
+    get:
+      tags: [files]
+      operationId: listVisibleFiles
+      summary: List files visible to the requester (PUBLIC ∪ mine)
+      parameters:
+        - $ref: '#/components/parameters/XUserId'
+        - $ref: '#/components/parameters/Tag'
+        - $ref: '#/components/parameters/SortBy'
+        - $ref: '#/components/parameters/Asc'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Page'
+  /files/{id}/rename:
+    patch:
+      tags: [files]
+      operationId: renameFile
+      summary: Rename a file
+      parameters:
+        - $ref: '#/components/parameters/Id'
+        - $ref: '#/components/parameters/XUserId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [filename]
+              properties:
+                filename:
+                  type: string
+                  description: New filename (must be unique per user)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/File'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Conflict — new filename already exists for this user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /files/{id}:
+    delete:
+      tags: [files]
+      operationId: deleteFile
+      summary: Delete a file (owner only)
+      parameters:
+        - $ref: '#/components/parameters/Id'
+        - $ref: '#/components/parameters/XUserId'
+      responses:
+        '204':
+          description: No Content
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /download/{token}:
+    get:
+      tags: [download]
+      operationId: downloadByToken
+      summary: Download by secure token
+      description: |
+        Streams the file contents for a valid token. The token is an unguessable, opaque
+        string returned by the upload endpoint. Works for both PUBLIC and PRIVATE files.
+      parameters:
+        - $ref: '#/components/parameters/Token'
+      responses:
+        '200':
+          description: OK (binary stream)
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '404':
+          $ref: '#/components/responses/NotFound'
+components:
+  schemas:
+    FileVisibility:
+      type: string
+      enum: [PUBLIC, PRIVATE]
+    File:
+      type: object
+      properties:
+        id:
+          type: string
+          example: 656d7fa8c1a2b3c4d5e6f7a8
+        filename:
+          type: string
+          example: report.pdf
+        visibility:
+          $ref: '#/components/schemas/FileVisibility'
+        tags:
+          type: array
+          items: { type: string }
+          example: [invoices, 2025]
+        size:
+          type: integer
+          format: int64
+          example: 123456
+        contentType:
+          type: string
+          example: application/pdf
+        uploadedAt:
+          type: string
+          format: date-time
+          example: 2025-09-18T09:00:00Z
+        downloadLink:
+          type: string
+          description: Relative download URL starting with /download/
+          example: /download/AbCDefGhIjKlMnOpQrStUv
+      required: [id, filename, visibility, size, contentType, uploadedAt, downloadLink]
+    Page:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/File'
+        page:
+          type: integer
+          minimum: 0
+          example: 0
+        size:
+          type: integer
+          minimum: 1
+          example: 20
+        total:
+          type: integer
+          format: int64
+          example: 200
+      required: [items, page, size, total]
+    Error:
+      type: object
+      properties:
+        code:
+          type: string
+          example: DUPLICATE_CONTENT
+        message:
+          type: string
+          example: A file with the same content already exists for this user.
+        details:
+          nullable: true
+          description: Optional extra information
+      required: [code, message]
+  parameters:
+    XUserId:
+      name: X-User-Id
+      in: header
+      required: true
+      schema: { type: string }
+      description: User id of the caller; this service does not expose authentication endpoints.
+    Tag:
+      name: tag
+      in: query
+      required: false
+      schema: { type: string }
+      description: Case-insensitive exact tag match.
+    SortBy:
+      name: sortBy
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [filename, uploadedAt, tag, contentType, size, name, date, createdAt, type]
+      description: "Field to sort by (aliases accepted: name, date, createdAt, type)."
+    Asc:
+      name: asc
+      in: query
+      required: false
+      schema:
+        type: boolean
+        default: false
+      description: Sort ascending if true; descending if false.
+    Page:
+      name: page
+      in: query
+      required: false
+      schema: { type: integer, minimum: 0, default: 0 }
+      description: Zero-based page index.
+    Size:
+      name: size
+      in: query
+      required: false
+      schema: { type: integer, minimum: 1, maximum: 200, default: 20 }
+      description: Page size.
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+    Token:
+      name: token
+      in: path
+      required: true
+      schema: { type: string }
+      description: Opaque, unguessable token.
+  responses:
+    BadRequest:
+      description: Bad Request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: Forbidden
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Not Found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
