@@ -124,17 +124,17 @@ class UploadFileServiceConcurrencyIT extends IntegrationTestBase {
     @TestConfiguration
     static class TestBeans {
         @Bean @Primary
-        RecordingStoragePort mockStoragePort() {
+        RecordingStoragePort storagePort() {
             return new RecordingStoragePort();
         }
 
         @Bean @Primary
-        VirusScanner mockScanner() {
+        VirusScanner scanner() {
             return source -> VirusScanner.ScanReport.clean("IT");
         }
 
         @Bean @Primary
-        FileTypeDetector mockFileTypeDetector() {
+        FileTypeDetector fileTypeDetector() {
             return (source, originalName) -> Optional.of("text/plain");
         }
     }
