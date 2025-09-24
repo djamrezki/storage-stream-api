@@ -23,10 +23,13 @@ public class GlobalExceptionHandler {
     // ---- 409: Duplicates / Conflicts ----
     @ExceptionHandler(DuplicateFileException.class)
     public ResponseEntity<ErrorResponse> handleDup(DuplicateFileException ex) {
-        String code = "DUPLICATE_" + ex.getKind().name(); // e.g., DUPLICATE_CONTENT or DUPLICATE_FILENAME
+        String kind = (ex.getKind() != null) ? ex.getKind().name() : "UNKNOWN";
+        String code = "DUPLICATE_" + kind;           // e.g. DUPLICATE_CONTENT / DUPLICATE_FILENAME / DUPLICATE_UNKNOWN
+        String msg  = (ex.getMessage() != null) ? ex.getMessage() : "Duplicate file";
         return ResponseEntity.status(HttpStatus.CONFLICT)
-                .body(new ErrorResponse(code, ex.getMessage()));
+                .body(new ErrorResponse(code, msg));
     }
+
 
     @ExceptionHandler(ConflictException.class)
     public ResponseEntity<ErrorResponse> handleConflict(ConflictException ex) {

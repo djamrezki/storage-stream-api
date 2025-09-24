@@ -51,7 +51,7 @@ public class RenameFileServiceReactive {
                     return files.existsByOwnerIdAndFilenameLc(ownerId, normalizedLc)
                             .flatMap(exists -> {
                                 if (exists) {
-                                    return Mono.error(new DuplicateFileException("Filename already exists"));
+                                    return Mono.error(new DuplicateFileException(DuplicateFileException.Kind.FILENAME,"Filename already exists"));
                                 }
                                 existing.setFilename(normalized);
                                 existing.setFilenameLc(normalizedLc);

@@ -75,7 +75,7 @@ public class ReactiveUploadService {
                         if (dup) {
                             // Content duplicate detected early: cleanup blob and raise domain error
                             return storage.delete(stored.gridFsId())
-                                    .then(Mono.error(new DuplicateFileException("File content already exists")));
+                                    .then(Mono.error(new DuplicateFileException(DuplicateFileException.Kind.CONTENT, "File content already exists")));
                         }
 
                         // Decide final content type:
@@ -106,11 +106,11 @@ public class ReactiveUploadService {
                                     // content duplicate -> cleanup blob
                                     if (isDupOn(ex, "uniq_owner_sha256")) {
                                         return storage.delete(stored.gridFsId()).onErrorResume(e -> Mono.empty())
-                                                .then(Mono.error(new DuplicateFileException("File content already exists")));
+                                                .then(Mono.error(new DuplicateFileException(DuplicateFileException.Kind.CONTENT,"File content already exists")));
                                     }
                                     // filename duplicate -> keep blob (surviving blob kept)
                                     if (isDupOn(ex, "uniq_owner_filename")) {
-                                        return Mono.error(new DuplicateFileException("Filename already exists"));
+                                        return Mono.error(new DuplicateFileException(DuplicateFileException.Kind.FILENAME,"Filename already exists"));
                                     }
                                     // unknown duplicate -> keep blob, bubble up
                                     return Mono.error(ex);
