@@ -94,21 +94,23 @@ public class ReactiveFileController {
         }
     }
 
-    // ---- Rename ----
-    @PatchMapping(path = "/files/{id}/rename", consumes = MediaType.APPLICATION_JSON_VALUE)
+    static final class RenameRequest {
+        public String filename;
+    }
+
+    @PatchMapping(path = "/files/{id}/rename", consumes = MediaType.APPLICATION_JSON_VALUE,
+            produces = MediaType.APPLICATION_JSON_VALUE)
     public Mono<FileEntryDto> rename(@RequestHeader("X-User-Id") String ownerId,
                                      @PathVariable String id,
-                                     @RequestBody MultiValueMap<String, String> body) {
-        final String newName = Optional.ofNullable(body.getFirst("filename"))
+                                     @RequestBody RenameRequest body) {
+        final String newName = Optional.ofNullable(body.filename)
                 .filter(s -> !s.isBlank())
                 .orElseThrow(() -> new IllegalArgumentException("filename is required"));
 
         return files.findById(id)
                 .switchIfEmpty(Mono.error(new NotFoundException("File not found")))
                 .flatMap(fe -> {
-                    if (!ownerId.equals(fe.getOwnerId())) {
-                        return Mono.error(new NotFoundException("File not found"));
-                    }
+                    if (!ownerId.equals(fe.getOwnerId())) return Mono.error(new NotFoundException("File not found"));
                     fe.setFilename(newName);
                     fe.setFilenameLc(newName.toLowerCase(Locale.ROOT));
                     fe.setUpdatedAt(Instant.now());
@@ -145,9 +147,8 @@ public class ReactiveFileController {
     }
 
     private Sort resolveSort(String sortParam) {
-        // expected values: name, uploadedAt, contentType, size; default uploadedAt desc
         if (sortParam == null || sortParam.isBlank()) {
-            return Sort.by(Sort.Order.desc("uploadedAt"));
+            return Sort.by(Sort.Order.desc("createdAt")); // was uploadedAt
         }
         List<Sort.Order> orders = new ArrayList<>();
         for (String token : sortParam.split(",")) {
@@ -156,16 +157,17 @@ public class ReactiveFileController {
             String field = desc ? t.substring(1) : (t.startsWith("+") ? t.substring(1) : t);
             String mapped = switch (field) {
                 case "filename", "name" -> "filenameLc";
-                case "uploadDate", "uploadedAt" -> "uploadedAt";
-                case "tag", "tags" -> "tags";
+                case "uploadDate", "uploadedAt", "createdAt" -> "createdAt"; // normalize here
+                case "updatedAt" -> "updatedAt";
                 case "contentType" -> "contentType";
                 case "size", "fileSize" -> "size";
-                default -> "uploadedAt";
+                default -> "createdAt";
             };
             orders.add(desc ? Sort.Order.desc(mapped) : Sort.Order.asc(mapped));
         }
         return Sort.by(orders);
     }
+
 
     // ---- Download by unguessable token ----
     @GetMapping("/download/{token}")
@@ -183,8 +185,11 @@ public class ReactiveFileController {
                                     .orElse(MediaType.APPLICATION_OCTET_STREAM);
                             response.getHeaders().setContentType(ct);
                             response.getHeaders().set(HttpHeaders.CONTENT_LENGTH, String.valueOf(fe.getSize()));
-                            ContentDisposition cd = ContentDisposition.attachment().filename(fe.getFilename()).build();
+                            ContentDisposition cd = ContentDisposition.attachment()
+                                    .filename(fe.getFilename(), java.nio.charset.StandardCharsets.UTF_8)
+                                    .build();
                             response.getHeaders().setContentDisposition(cd);
+
                             return response.writeWith(res.getDownloadStream());
                         }));
     }

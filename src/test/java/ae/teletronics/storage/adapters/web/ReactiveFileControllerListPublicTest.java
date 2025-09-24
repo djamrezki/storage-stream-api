@@ -60,7 +60,7 @@ class ReactiveFileControllerListPublicTest {
         assertThat(pg.getValue().getPageNumber()).isEqualTo(0);
         assertThat(pg.getValue().getPageSize()).isEqualTo(10);
         assertThat(pg.getValue().getSort().toString().toLowerCase())
-                .contains("uploadedat: desc");
+                .contains("createdat: desc");
     }
 
     @Test
