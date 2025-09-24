@@ -1,47 +1,16 @@
-version: "3.8"
-
 services:
+  storage:
+    image: djamrezki/storage-stream-api:latest
+    build: .
+    mem_limit: 1g
+    tmpfs:
+      - /tmp
+    environment:
+      - SPRING_DATA_MONGODB_URI=mongodb://mongo:27017/storage
+    depends_on: [mongo]
   mongo:
     image: mongo:7
-    container_name: storage-mongo
-    ports:
-      - "27017:27017"
     volumes:
       - mongo_data:/data/db
-    healthcheck:
-      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ ping: 1 }).ok"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-
-  storage-api:
-    image: ghcr.io/djamrezki/storage-api:latest
-    pull_policy: always                            # always fetch latest tag
-    container_name: storage-api
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "5"
-    environment:
-      SPRING_DATA_MONGODB_URI: mongodb://mongo:27017/storage
-      STORAGE_PATH: /data/storage
-      JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=75.0
-    ports:
-      - "8080:8080"
-    depends_on:
-      mongo:
-        condition: service_healthy
-    volumes:
-      - storage_data:/data/storage
-    mem_limit: 1g
-    deploy:
-      resources:
-        limits:
-          memory: 1g
-    restart: unless-stopped
-
-volumes:
-  mongo_data:
-  storage_data:
+  volumes:
+    mongo_data:

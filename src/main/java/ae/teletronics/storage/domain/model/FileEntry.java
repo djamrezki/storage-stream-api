@@ -81,6 +81,9 @@ public class FileEntry {
     @LastModifiedDate
     private Instant updatedAt;
 
+    String gridFsId; // ObjectId string
+
+
     @Version
     private Long version;
 
@@ -140,6 +143,10 @@ public class FileEntry {
     public String getFilename() { return filename; }
     public String getFilenameLc() { return filenameLc; }
 
+    public void setFilenameLc(String filenameLc) {
+        this.filenameLc = filenameLc;
+    }
+
     public String getContentType() { return contentType; }
     public void setContentType(String contentType) { this.contentType = contentType; }
 
@@ -166,6 +173,14 @@ public class FileEntry {
 
     public Long getVersion() { return version; }
     public void setVersion(Long version) { this.version = version; }
+
+    public String getGridFsId() {
+        return gridFsId;
+    }
+
+    public void setGridFsId(String gridFsId) {
+        this.gridFsId = gridFsId;
+    }
 
     /* -------------------- Equality by id -------------------- */
 

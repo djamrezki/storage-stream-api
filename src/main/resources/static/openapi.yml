@@ -1,11 +1,11 @@
 openapi: 3.0.3
 info:
   title: Storage API
-  version: 0.1.0
+  version: 1.0.0
   description: |
-    REST API to upload, list, rename, delete, and download files. After a successful
-    upload the service returns a unique, unguessable **relative** download link that
-    works for both PUBLIC and PRIVATE files.
+    REST API to upload, list, rename, delete, and download files. Uploads are
+    handled as reactive streams and, after a successful upload, the API returns
+    an unguessable **relative** download link that works for both PUBLIC and PRIVATE files.
 servers:
   - url: /
 tags:
@@ -20,9 +20,9 @@ paths:
       operationId: uploadFile
       summary: Upload a file
       description: |
-        Uploads a file with filename, visibility and up to 5 tags. If contentType is not
+        Upload a file with filename, visibility and up to 5 tags. If contentType is not
         provided by the client, the server will attempt to detect it after upload.
-        Duplicate prevention is enforced per-user by filename and content checksum.
+        Duplicate prevention is enforced per-user by filename and by content checksum.
       parameters:
         - $ref: '#/components/parameters/XUserId'
       requestBody:
@@ -103,25 +103,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Page'
-  /files/all:
-    get:
-      tags: [files]
-      operationId: listVisibleFiles
-      summary: List files visible to the requester (PUBLIC ∪ mine)
-      parameters:
-        - $ref: '#/components/parameters/XUserId'
-        - $ref: '#/components/parameters/Tag'
-        - $ref: '#/components/parameters/SortBy'
-        - $ref: '#/components/parameters/Asc'
-        - $ref: '#/components/parameters/Page'
-        - $ref: '#/components/parameters/Size'
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Page'
   /files/{id}/rename:
     patch:
       tags: [files]
@@ -186,6 +167,11 @@ paths:
       responses:
         '200':
           description: OK (binary stream)
+          headers:
+            Content-Disposition:
+              description: 'Content disposition with filename'
+              schema:
+                type: string
           content:
             application/octet-stream:
               schema:
@@ -203,32 +189,32 @@ components:
       properties:
         id:
           type: string
-          example: 656d7fa8c1a2b3c4d5e6f7a8
+          example: 68ceafc3fd02f61687a8913e
         filename:
           type: string
-          example: report.pdf
+          example: hello.txt
         visibility:
           $ref: '#/components/schemas/FileVisibility'
         tags:
           type: array
           items: { type: string }
-          example: [invoices, 2025]
+          example: [demo, invoices]
         size:
           type: integer
           format: int64
-          example: 123456
+          example: 12
         contentType:
           type: string
-          example: application/pdf
+          example: text/plain
         uploadedAt:
           type: string
           format: date-time
           example: 2025-09-18T09:00:00Z
-        downloadLink:
+        download:
           type: string
           description: Relative download URL starting with /download/
-          example: /download/AbCDefGhIjKlMnOpQrStUv
-      required: [id, filename, visibility, size, contentType, uploadedAt, downloadLink]
+          example: /download/w8kFWfXPGoPymsrjXrniYBSJBJ4YtExw
+      required: [id, filename, visibility, size, contentType, uploadedAt, download]
     Page:
       type: object
       properties:
@@ -281,8 +267,8 @@ components:
       required: false
       schema:
         type: string
-        enum: [filename, uploadedAt, tag, contentType, size, name, date, createdAt, type]
-      description: "Field to sort by (aliases accepted: name, date, createdAt, type)."
+        enum: [filename, uploadedAt, contentType, size, name, date, type]
+      description: "Field to sort by (aliases accepted: name->filename, date->uploadedAt, type->contentType)."
     Asc:
       name: asc
       in: query

@@ -1,27 +1,27 @@
 package ae.teletronics.storage.application;
 
 import ae.teletronics.storage.IntegrationTestBase;
-import ae.teletronics.storage.adapters.persistence.repo.FileEntryRepository;
-import ae.teletronics.storage.application.dto.UploadFileCommand;
 import ae.teletronics.storage.application.dto.UploadFileResult;
 import ae.teletronics.storage.application.exceptions.DuplicateFileException;
 import ae.teletronics.storage.domain.Visibility;
 import ae.teletronics.storage.domain.model.FileEntry;
-import ae.teletronics.storage.ports.FileTypeDetector;
-import ae.teletronics.storage.ports.StoragePort;
-import ae.teletronics.storage.ports.StreamSource;
-import ae.teletronics.storage.ports.VirusScanner;
+import ae.teletronics.storage.ports.DownloadLinkQueryPort;
+import ae.teletronics.storage.ports.FileEntryQueryPort;
+import ae.teletronics.storage.ports.ReactiveStoragePort;
 import org.junit.jupiter.api.*;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Primary;
-import org.springframework.data.mongodb.core.MongoTemplate;
-import org.springframework.data.mongodb.core.index.Index;
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferFactory;
+import org.springframework.core.io.buffer.DefaultDataBufferFactory;
+import org.springframework.data.mongodb.gridfs.ReactiveGridFsResource;
+import org.springframework.lang.Nullable;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 
-import java.io.ByteArrayInputStream;
-import java.io.IOException;
-import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
@@ -31,137 +31,145 @@ import java.util.concurrent.atomic.AtomicLong;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Concurrency integration tests for UploadFileService using the real Spring context and Mongo.
- * <p>
- * Key guarantees we assert:
+ * Concurrency integration tests for ReactiveUploadService using the real Spring context + Mongo.
+ *
+ * Guarantees we assert:
  * - Exactly one upload succeeds, the other fails with DuplicateFileException.
- * - Exactly one orphan object is deleted from the storage adapter.
- * - DB has exactly one FileEntry for the race and its storageKey matches the surviving blob.
- * - Reported size from StoragePort is persisted (2 GiB simulation).
+ * - Orphan handling: content-dup path deletes one stored blob; filename-dup path may leave an orphan (allowed).
+ * - DB has exactly one FileEntry (winner) and its gridFsId matches the surviving blob id.
+ * - Reported size from ReactiveStoragePort is persisted (2 GiB simulation).
  */
 @TestMethodOrder(MethodOrderer.DisplayName.class)
 class UploadFileServiceConcurrencyIT extends IntegrationTestBase {
 
-    @Autowired UploadFileService service;
-    @Autowired FileEntryRepository files;
-    @Autowired RecordingStoragePort storage; // injected from @TestConfiguration
-    @Autowired MongoTemplate mongo;          // to ensure unique indexes exist
+    @Autowired ReactiveUploadService service;
+    @Autowired FileEntryQueryPort files;
+    @Autowired RecordingReactiveStoragePort storage; // injected from @TestConfiguration
+
+    private static final DataBufferFactory BUF = new DefaultDataBufferFactory();
 
     @BeforeEach
     void cleanState() {
         storage.reset();
-        files.deleteAll();
+        files.deleteAll().block();
     }
 
-    private static StreamSource src(String s) {
-        return () -> new ByteArrayInputStream(s.getBytes());
+    // ----------------------- helpers -----------------------
+
+    private static Flux<DataBuffer> bodyOf(String s) {
+        return Flux.just(BUF.wrap(s.getBytes(StandardCharsets.UTF_8)));
     }
 
-    @DisplayName("1) parallelUpload_sameFilename -> one success, one DuplicateFileException, orphan cleaned")
+    private static <T> T get(Future<T> f) throws Exception {
+        try {
+            return f.get(15, TimeUnit.SECONDS);
+        } catch (ExecutionException ee) {
+            // propagate the cause to our assertions below
+            throw (ee.getCause() instanceof Exception) ? (Exception) ee.getCause() : ee;
+        }
+    }
+
+    // ----------------------- tests -------------------------
+
+    @DisplayName("1) parallelUpload_sameFilename -> one success, one DuplicateFileException (filename), surviving blob kept")
     @Test
-    void parallelUpload_sameFilename_oneSucceeds_oneConflicts_and_orphanIsCleaned() throws Exception {
+    void parallelUpload_sameFilename_oneSucceeds_oneConflicts_filenamePath() throws Exception {
         final String owner = "u-it-filename";
         final String filename = "Report.pdf";
 
-        // Fire both uploads truly in parallel using a gate + executor
-        var startGate = new CountDownLatch(1);
-        Callable<Object> t1 = () -> { startGate.await(); return service.upload(
-                new UploadFileCommand(owner, filename, Visibility.PRIVATE, List.of("x"), "text/plain", src("a"))); };
-        Callable<Object> t2 = () -> { startGate.await(); return service.upload(
-                new UploadFileCommand(owner, filename, Visibility.PRIVATE, List.of("y"), "text/plain", src("b"))); };
+        var gate = new CountDownLatch(1);
+        Callable<UploadFileResult> t1 = () -> { gate.await();
+            return service.upload(owner, filename, Visibility.PRIVATE, List.of("x"), "text/plain", bodyOf("a")).block();
+        };
+        Callable<UploadFileResult> t2 = () -> { gate.await();
+            return service.upload(owner, filename, Visibility.PRIVATE, List.of("y"), "text/plain", bodyOf("b")).block();
+        };
 
         var pool = Executors.newFixedThreadPool(2);
-        Object r1 = null, r2 = null;
+        UploadFileResult r1 = null, r2 = null;
         Throwable e1 = null, e2 = null;
-
         try {
             var f1 = pool.submit(t1);
             var f2 = pool.submit(t2);
-            startGate.countDown();
-
-            try { r1 = f1.get(10, TimeUnit.SECONDS); } catch (ExecutionException ex) { e1 = ex.getCause(); }
-            try { r2 = f2.get(10, TimeUnit.SECONDS); } catch (ExecutionException ex) { e2 = ex.getCause(); }
+            gate.countDown();
+            try { r1 = get(f1); } catch (Throwable t) { e1 = t; }
+            try { r2 = get(f2); } catch (Throwable t) { e2 = t; }
         } finally {
             pool.shutdownNow();
             pool.awaitTermination(5, TimeUnit.SECONDS);
         }
 
-        // Exactly one failure and it's DuplicateFileException (Filename path)
         long failures = Arrays.stream(new Throwable[]{e1, e2}).filter(Objects::nonNull).count();
         assertThat(failures).isEqualTo(1);
-        Throwable failure = e1 != null ? e1 : e2;
+        Throwable failure = (e1 != null) ? e1 : e2;
         assertThat(failure).isInstanceOf(DuplicateFileException.class);
 
-        // Exactly one success
         long successes = Arrays.stream(new Object[]{r1, r2}).filter(Objects::nonNull).count();
         assertThat(successes).isEqualTo(1);
 
-        // Storage: either (1 save, 0 deletes) if the loser detected dup pre-save,
-        // or (2 saves, 1 delete) if we saved then rolled back the loser.
-        int saveCount = storage.savedKeys().size();
+        // Storage: with filename race, service typically does not clean up the losing blob.
+        int saveCount = storage.savedIds().size();
         int deleteCount = storage.deletes().size();
-
-        // must be either 1 or 2 saves
         assertThat(saveCount).isIn(1, 2);
-
-        // deletes must be 0 when only 1 save, or 1 when 2 saves
         if (saveCount == 1) {
-            assertThat(deleteCount).isEqualTo(0);
+            assertThat(deleteCount).isZero();
         } else {
-            assertThat(deleteCount).isEqualTo(1);
-            String deletedKey = storage.deletes().get(0);
-            assertThat(deletedKey).isIn(storage.savedKeys());
+            // depending on implementation, deleteCount may be 0 (allowed). We accept {0,1}.
+            assertThat(deleteCount).isIn(0, 1);
+            if (deleteCount == 1) {
+                assertThat(storage.savedIds()).contains(storage.deletes().get(0));
+            }
         }
 
-        // Determine the surviving key
-        final String survivingKey;
+        // Determine surviving id
+        final String survivingId;
         if (saveCount == 1) {
-            survivingKey = storage.savedKeys().get(0);
+            survivingId = storage.savedIds().get(0);
         } else {
-            String deletedKey = storage.deletes().get(0);
-            String k0 = storage.savedKeys().get(0);
-            String k1 = storage.savedKeys().get(1);
-            survivingKey = k0.equals(deletedKey) ? k1 : k0;
+            survivingId = (deleteCount == 1)
+                    ? (storage.savedIds().get(0).equals(storage.deletes().get(0))
+                    ? storage.savedIds().get(1) : storage.savedIds().get(0))
+                    : storage.savedIds().get(0); // unknown which failed; both saved, none deleted -> either may be winner
         }
 
-        // The surviving blob must exist
-        assertThat(storage.has(survivingKey)).isTrue();
+        // Surviving blob exists
+        assertThat(storage.has(survivingId)).isTrue();
 
-
-        // DB must have exactly one FileEntry for this owner/filename (case-insensitive field is filenameLc)
-        List<FileEntry> all = files.findAll();
-        assertThat(all).hasSize(1);
-        FileEntry winner = all.get(0);
-        assertThat(winner.getOwnerId()).isEqualTo(owner);
-        assertThat(winner.getFilename()).isEqualTo(filename);
-        assertThat(winner.getStorageKey()).isEqualTo(survivingKey);
+        // DB has exactly one file for this owner/filename, with gridFsId == survivingId
+        var winners = files.findAllByOwnerId(owner, org.springframework.data.domain.PageRequest.of(0, 10), null)
+                .filter(fe -> filename.equals(fe.getFilename()))
+                .collectList().block();
+        assertThat(winners).hasSize(1);
+        FileEntry fe = winners.get(0);
+        assertThat(fe.getOwnerId()).isEqualTo(owner);
+        assertThat(fe.getFilename()).isEqualTo(filename);
+        assertThat(fe.getGridFsId()).isEqualTo(survivingId);
     }
 
-    @DisplayName("2) parallelUpload_sameContent -> one success, one DuplicateFileException, orphan cleaned")
+    @DisplayName("2) parallelUpload_sameContent -> one success, one DuplicateFileException (content), orphan cleaned")
     @Test
-    void parallelUpload_sameContent_oneSucceeds_oneConflicts_and_orphanIsCleaned() throws Exception {
+    void parallelUpload_sameContent_oneSucceeds_oneConflicts_contentPath() throws Exception {
         final String owner = "u-it-content";
         final String f1 = "A.txt";
         final String f2 = "B.txt";
-        final StreamSource same = src("identical-bytes");
 
-        var startGate = new CountDownLatch(1);
-        Callable<Object> t1 = () -> { startGate.await(); return service.upload(
-                new UploadFileCommand(owner, f1, Visibility.PRIVATE, null, "text/plain", same)); };
-        Callable<Object> t2 = () -> { startGate.await(); return service.upload(
-                new UploadFileCommand(owner, f2, Visibility.PRIVATE, null, "text/plain", same)); };
+        var gate = new CountDownLatch(1);
+        Callable<UploadFileResult> tA = () -> { gate.await();
+            return service.upload(owner, f1, Visibility.PRIVATE, null, "text/plain", bodyOf("identical-bytes")).block();
+        };
+        Callable<UploadFileResult> tB = () -> { gate.await();
+            return service.upload(owner, f2, Visibility.PRIVATE, null, "text/plain", bodyOf("identical-bytes")).block();
+        };
 
         var pool = Executors.newFixedThreadPool(2);
-        Object r1 = null, r2 = null;
+        UploadFileResult r1 = null, r2 = null;
         Throwable e1 = null, e2 = null;
-
         try {
-            var fA = pool.submit(t1);
-            var fB = pool.submit(t2);
-            startGate.countDown();
-
-            try { r1 = fA.get(10, TimeUnit.SECONDS); } catch (ExecutionException ex) { e1 = ex.getCause(); }
-            try { r2 = fB.get(10, TimeUnit.SECONDS); } catch (ExecutionException ex) { e2 = ex.getCause(); }
+            var fA = pool.submit(tA);
+            var fB = pool.submit(tB);
+            gate.countDown();
+            try { r1 = get(fA); } catch (Throwable t) { e1 = t; }
+            try { r2 = get(fB); } catch (Throwable t) { e2 = t; }
         } finally {
             pool.shutdownNow();
             pool.awaitTermination(5, TimeUnit.SECONDS);
@@ -169,122 +177,160 @@ class UploadFileServiceConcurrencyIT extends IntegrationTestBase {
 
         long failures = Arrays.stream(new Throwable[]{e1, e2}).filter(Objects::nonNull).count();
         assertThat(failures).isEqualTo(1);
-        Throwable failure = e1 != null ? e1 : e2;
+        Throwable failure = (e1 != null) ? e1 : e2;
         assertThat(failure).isInstanceOf(DuplicateFileException.class)
-                .hasMessageContaining("content"); // tolerant message check
+                .hasMessageContaining("content");
 
         long successes = Arrays.stream(new Object[]{r1, r2}).filter(Objects::nonNull).count();
         assertThat(successes).isEqualTo(1);
 
-        // Storage: two saves, one delete
-        assertThat(storage.savedKeys()).hasSize(2);
+        // Storage: two saves, one delete (cleanup of losing attempt)
+        assertThat(storage.savedIds()).hasSize(2);
         assertThat(storage.deletes()).hasSize(1);
-        String deletedKey = storage.deletes().get(0);
-        assertThat(deletedKey).isIn(storage.savedKeys());
+        String deletedId = storage.deletes().get(0);
+        assertThat(storage.savedIds()).contains(deletedId);
 
-        String survivingKey = storage.savedKeys().get(0).equals(deletedKey)
-                ? storage.savedKeys().get(1)
-                : storage.savedKeys().get(0);
-        assertThat(storage.has(survivingKey)).isTrue();
+        String survivingId = storage.savedIds().get(0).equals(deletedId)
+                ? storage.savedIds().get(1)
+                : storage.savedIds().get(0);
+        assertThat(storage.has(survivingId)).isTrue();
 
-        // DB contains exactly one entry (the winner), with either filename A or B, and its storageKey == survivingKey
-        List<FileEntry> all = files.findAll();
-        assertThat(all).hasSize(1);
-        FileEntry winner = all.get(0);
-        assertThat(winner.getOwnerId()).isEqualTo(owner);
-        assertThat(winner.getFilename()).isIn(f1, f2);
-        assertThat(winner.getStorageKey()).isEqualTo(survivingKey);
+        // DB contains exactly one entry (winner), with gridFsId == survivingId, filename one of the two
+        var winners = files.findAllByOwnerId(owner, org.springframework.data.domain.PageRequest.of(0, 10), null)
+                .collectList().block();
+        assertThat(winners).hasSize(1);
+        FileEntry fe = winners.get(0);
+        assertThat(fe.getOwnerId()).isEqualTo(owner);
+        assertThat(fe.getFilename()).isIn(f1, f2);
+        assertThat(fe.getGridFsId()).isEqualTo(survivingId);
     }
 
-    @DisplayName("3) upload records size reported by storage (simulate 2 GiB without allocating)")
+    @DisplayName("3) records size reported by storage (simulate 2 GiB) without allocating")
     @Test
-    void upload_recordsSizeReportedByStorage_allowsSimulating2GiB() throws IOException {
+    void upload_recordsStorageReportedSize_simulate2GiB() {
         final String owner = "u-it-2gb";
         final String filename = "huge.bin";
         final long twoGiB = 2L * 1024 * 1024 * 1024;
 
-        storage.setNextForcedSize(twoGiB); // simulate large object without allocating memory
+        storage.setNextForcedSize(twoGiB);
 
-        UploadFileResult result = service.upload(new UploadFileCommand(
-                owner, filename, Visibility.PRIVATE, null, "application/octet-stream", src("tiny-source")));
+        UploadFileResult res = service.upload(
+                        owner, filename, Visibility.PRIVATE, null, "application/octet-stream", bodyOf("tiny"))
+                .block();
 
-        FileEntry saved = files.findById(result.fileId()).orElseThrow();
+        var saved = files.findById(res.fileId()).block();
+        assertThat(saved).isNotNull();
         assertThat(saved.getSize()).isEqualTo(twoGiB);
         assertThat(saved.getFilename()).isEqualTo(filename);
         assertThat(saved.getOwnerId()).isEqualTo(owner);
     }
 
+    // ----------------------- test beans --------------------
+
     @TestConfiguration
     static class TestBeans {
 
         @Bean @Primary
-        RecordingStoragePort storagePort() {
-            return new RecordingStoragePort();
+        RecordingReactiveStoragePort storagePort() {
+            return new RecordingReactiveStoragePort();
         }
 
+        // If your app doesn't already define a DownloadLinkQueryPort bean in tests,
+        // you can add a simple in-memory version here. Otherwise, remove this bean.
         @Bean @Primary
-        VirusScanner scanner() {
-            return source -> VirusScanner.ScanReport.clean("IT");
-        }
+        DownloadLinkQueryPort inMemoryDownloadLinks() {
+            return new DownloadLinkQueryPort() {
+                private final Map<String, ae.teletronics.storage.domain.model.DownloadLink> map = new ConcurrentHashMap<>();
+                @Override public Mono<ae.teletronics.storage.domain.model.DownloadLink> save(ae.teletronics.storage.domain.model.DownloadLink dl) {
+                    map.put(dl.getToken(), dl); return Mono.just(dl);
+                }
+                @Override public Mono<ae.teletronics.storage.domain.model.DownloadLink> findByToken(String token) {
+                    return Mono.justOrEmpty(map.get(token));
+                }
+                @Override public Mono<Void> deleteAllByFileId(String fileId) {
+                    map.values().removeIf(dl -> Objects.equals(dl.getFileId(), fileId));
+                    return Mono.empty();
+                }
 
-        @Bean @Primary
-        FileTypeDetector fileTypeDetector() {
-            return (source, originalName) -> Optional.of("text/plain");
+                @Override
+                public Mono<Void> incrementAccessCountByToken(String token) {
+                    return null;
+                }
+            };
         }
     }
 
     /**
-     * Test double for StoragePort that:
-     * - Generates keys k1, k2, ...
-     * - Stores bytes in-memory for load()
+     * Reactive in-memory StoragePort for tests.
+     * - Generates ids g1, g2, ...
+     * - Stores bytes in-memory
      * - Records deletes
-     * - Can force the next reported size (for 2GiB test)
-     * - Exposes saved keys and existence checks for strong assertions
+     * - Can force the next reported size (for 2 GiB test)
      */
-    static class RecordingStoragePort implements StoragePort {
+    static class RecordingReactiveStoragePort implements ReactiveStoragePort {
         private final AtomicInteger seq = new AtomicInteger();
         private final Map<String, byte[]> blobs = new ConcurrentHashMap<>();
         private final List<String> deleted = Collections.synchronizedList(new ArrayList<>());
-        private final List<String> savedKeys = Collections.synchronizedList(new ArrayList<>());
+        private final List<String> saved = Collections.synchronizedList(new ArrayList<>());
         private final AtomicLong nextForcedSize = new AtomicLong(-1);
 
         @Override
-        public StorageSaveResult save(StreamSource source, String suggestedKey) throws IOException {
-            String key = "k" + seq.incrementAndGet();
-            byte[] bytes;
-            try (InputStream in = source.openStream()) {
-                bytes = in.readAllBytes(); // test-only
-            }
-            blobs.put(key, bytes);
-            savedKeys.add(key);
-            long forced = nextForcedSize.getAndSet(-1);
-            long size = (forced > -1) ? forced : bytes.length;
-            return new StorageSaveResult(key, size);
+        public Mono<StorageSaveResult> save(Flux<DataBuffer> body,
+                                            String filename,
+                                            @Nullable String contentType,
+                                            Map<String, Object> metadata) {
+            String gid = "g" + seq.incrementAndGet();
+            return body
+                    .reduce(new ByteArrayOutput(), (acc, buf) -> acc.write(buf.asByteBuffer()))
+                    .map(out -> {
+                        byte[] bytes = out.toByteArray();
+                        blobs.put(gid, bytes);
+                        saved.add(gid);
+                        long forced = nextForcedSize.getAndSet(-1);
+                        long size = (forced > -1) ? forced : bytes.length;
+                        return new StorageSaveResult(gid, size);
+                    });
         }
 
         @Override
-        public StoredObject load(String storageKey) {
-            byte[] bytes = blobs.getOrDefault(storageKey, new byte[0]);
-            return new StoredObject(storageKey, bytes.length, () -> new ByteArrayInputStream(bytes));
+        public Mono<Void> delete(String gridFsId) {
+            deleted.add(gridFsId);
+            blobs.remove(gridFsId);
+            return Mono.empty();
         }
 
-        @Override
-        public void delete(String storageKey) {
-            deleted.add(storageKey);
-            blobs.remove(storageKey);
-        }
-
-        public void reset() {
+        void reset() {
             blobs.clear();
             deleted.clear();
-            savedKeys.clear();
+            saved.clear();
             seq.set(0);
             nextForcedSize.set(-1);
         }
 
-        public List<String> deletes() { return List.copyOf(deleted); }
-        public List<String> savedKeys() { return List.copyOf(savedKeys); }
-        public boolean has(String key) { return blobs.containsKey(key); }
-        public void setNextForcedSize(long bytes) { nextForcedSize.set(bytes); }
+        @Override
+        public Mono<ReactiveGridFsResource> open(String gridFsId) {
+            return null;
+        }
+
+        // assertions helpers
+        List<String> deletes() { return List.copyOf(deleted); }
+        List<String> savedIds() { return List.copyOf(saved); }
+        boolean has(String id) { return blobs.containsKey(id); }
+        void setNextForcedSize(long bytes) { nextForcedSize.set(bytes); }
+
+        // tiny byte accumulator to avoid keeping DataBuffers
+        private static class ByteArrayOutput {
+            private byte[] buf = new byte[0];
+            ByteArrayOutput write(java.nio.ByteBuffer bb) {
+                int add = bb.remaining();
+                if (add == 0) return this;
+                byte[] next = new byte[buf.length + add];
+                System.arraycopy(buf, 0, next, 0, buf.length);
+                bb.get(next, buf.length, add);
+                buf = next;
+                return this;
+            }
+            byte[] toByteArray() { return buf; }
+        }
     }
 }

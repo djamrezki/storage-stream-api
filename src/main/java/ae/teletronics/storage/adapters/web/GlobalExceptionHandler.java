@@ -45,12 +45,6 @@ public class GlobalExceptionHandler {
                 .body(new ErrorResponse("NOT_FOUND", ex.getMessage()));
     }
 
-    @ExceptionHandler({IllegalArgumentException.class, MultipartException.class, MissingRequestHeaderException.class})
-    public ResponseEntity<ErrorResponse> handleBadRequest(Exception ex) {
-        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                .body(new ErrorResponse("BAD_REQUEST", ex.getMessage()));
-    }
-
     @ExceptionHandler(VirusDetectedException.class)
     public ResponseEntity<ErrorResponse> handleVirus(VirusDetectedException ex) {
         return ResponseEntity.status(HttpStatus.BAD_REQUEST)

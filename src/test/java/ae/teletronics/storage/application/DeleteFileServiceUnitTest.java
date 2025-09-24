@@ -1,15 +1,11 @@
 package ae.teletronics.storage.application;
 
 
-import ae.teletronics.storage.adapters.persistence.repo.DownloadLinkRepository;
-import ae.teletronics.storage.adapters.persistence.repo.FileEntryRepository;
-import ae.teletronics.storage.application.exceptions.ForbiddenOperationException;
 import ae.teletronics.storage.application.exceptions.NotFoundException;
 import ae.teletronics.storage.domain.model.FileEntry;
-import ae.teletronics.storage.ports.FileTypeDetector;
-import ae.teletronics.storage.ports.StoragePort;
-import ae.teletronics.storage.ports.VirusScanner;
-import org.junit.jupiter.api.BeforeEach;
+import ae.teletronics.storage.ports.DownloadLinkQueryPort;
+import ae.teletronics.storage.ports.FileEntryQueryPort;
+import ae.teletronics.storage.ports.ReactiveStoragePort;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InOrder;
@@ -17,118 +13,108 @@ import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
-
-import java.io.IOException;
-import java.util.Optional;
+import reactor.core.publisher.Mono;
+import reactor.test.publisher.PublisherProbe;
 
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.assertj.core.api.AssertionsForClassTypes.assertThat;
-import static org.assertj.core.api.AssertionsForClassTypes.catchThrowable;
-import static org.mockito.ArgumentMatchers.any;
+
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
 class DeleteFileServiceUnitTest {
 
-    @Mock FileEntryRepository files;
-    @Mock DownloadLinkRepository links;
-    @Mock StoragePort storage;
-    @Mock FileTypeDetector typeDetector;     // not used here, but service likely needs it in ctor
-    @Mock VirusScanner virusScanner;         // same
+    @Mock FileEntryQueryPort files;          // << was FileEntryRepository
+    @Mock DownloadLinkQueryPort links;
+    @Mock ReactiveStoragePort storage;
 
-    @InjectMocks DeleteFileService service;
+    @InjectMocks DeleteFileServiceReactive service;
 
-    private FileEntry file(String id, String owner, String storageKey) {
+    private FileEntry file(String id, String owner, String storageKey, String gridFsId) {
         var f = new FileEntry();
         f.setId(id);
         f.setOwnerId(owner);
-        f.setStorageKey(storageKey);
+        f.setStorageKey(storageKey); // if you still keep it
+        f.setGridFsId(gridFsId);     // used by service.delete(...)
         return f;
     }
 
-    @BeforeEach
-    void setUp() {
-        // if your UploadFileService has other collaborators in ctor, @InjectMocks will wire mocks
-        // nothing else to init
-    }
-
     @Test
-    void delete_owner_ok_removesStorage_thenDb_and_links() throws IOException {
-        // given
+    void delete_owner_ok_removesStorage_thenDb_and_links() {
         var owner = "u1";
-        var fe = file("F1", owner, "bucket/key1");
-        when(files.findById("F1")).thenReturn(Optional.of(fe));
+        var fe = file("F1", owner, "bucket/key1", "gfs-1");
 
-        // when
-        service.delete(owner, "F1");
+        when(files.findById("F1")).thenReturn(Mono.just(fe));
+        when(links.deleteAllByFileId("F1")).thenReturn(Mono.empty());
+        when(storage.delete("gfs-1")).thenReturn(Mono.empty());
+        when(files.deleteById("F1")).thenReturn(Mono.empty());
 
-        // then
-        // order: delete bytes first, then DB, then links (or vice-versa if you designed it differently)
+        // subscribe to trigger the pipeline
+        service.delete(owner, "F1").block();
+
         InOrder inOrder = Mockito.inOrder(storage, files, links);
-        inOrder.verify(storage).delete("bucket/key1");
+        // your service deletes links first, then blob, then metadata
+        inOrder.verify(links).deleteAllByFileId("F1");
+        inOrder.verify(storage).delete("gfs-1");
         inOrder.verify(files).deleteById("F1");
-        // adapt to your repo method (by fileId or cascading). If you don’t delete links explicitly, remove this:
-        inOrder.verify(links).deleteByFileId("F1");
-
         verifyNoMoreInteractions(storage, files, links);
     }
 
     @Test
-    void delete_nonOwner_forbidden_noSideEffects() {
-        // given
-        var fe = file("F1", "owner", "k");
-        when(files.findById("F1")).thenReturn(Optional.of(fe));
+    void delete_nonOwner_returnsNotFound_noSideEffects() {
+        var fe = file("F1", "owner", "k", "gfs-1");
+        when(files.findById("F1")).thenReturn(Mono.just(fe));
 
-        // expect
-        assertThatThrownBy(() -> service.delete("intruder", "F1"))
-                .isInstanceOf(ForbiddenOperationException.class);
+        assertThatThrownBy(() -> service.delete("intruder", "F1").block())
+                .isInstanceOf(NotFoundException.class); // service intentionally hides existence
 
-        verifyNoInteractions(storage);
-        verify(files, never()).deleteById(any());
-        verifyNoInteractions(links);
+        verifyNoInteractions(storage, links);
+        verify(files, never()).deleteById(anyString());
     }
 
     @Test
     void delete_notFound_throws404_noSideEffects() {
-        when(files.findById("NF")).thenReturn(Optional.empty());
+        when(files.findById("NF")).thenReturn(Mono.empty());
 
-        assertThatThrownBy(() -> service.delete("u", "NF"))
+        assertThatThrownBy(() -> service.delete("u", "NF").block())
                 .isInstanceOf(NotFoundException.class);
 
         verifyNoInteractions(storage, links);
-        verify(files, never()).deleteById(any());
+        verify(files, never()).deleteById(anyString());
     }
 
     @Test
-    void delete_storageFailure_bubblesUp_and_keepsDb() throws IOException {
-        // given
-        var fe = file("F1", "u1", "k1");
-        when(files.findById("F1")).thenReturn(Optional.of(fe));
-        doThrow(new RuntimeException("S3 down")).when(storage).delete("k1");
+    void delete_storageFailure_bubblesUp_and_keepsDb() {
+        var fe = file("F1", "u1", "k1", "gfs-1");
+        when(files.findById("F1")).thenReturn(Mono.just(fe));
+        when(links.deleteAllByFileId("F1")).thenReturn(Mono.empty());
 
-        // expect
-        Throwable t = catchThrowable(() -> service.delete("u1", "F1"));
+        // Simulate failure
+        when(storage.delete("gfs-1"))
+                .thenReturn(Mono.error(new RuntimeException("S3 down")));
 
-        assertThat(t)
+        // Probe for deleteById
+        PublisherProbe<Void> deleteProbe = PublisherProbe.empty();
+        when(files.deleteById("F1")).thenReturn(deleteProbe.mono());
+
+        assertThatThrownBy(() -> service.delete("u1", "F1").block())
                 .isInstanceOf(RuntimeException.class)
-                .hasMessageContaining("Failed to delete stored object")
-                .hasRootCauseInstanceOf(RuntimeException.class)
-                .hasRootCauseMessage("S3 down");
+                .hasMessage("S3 down");
 
-        // then: DB untouched, links untouched
-        verify(files, never()).deleteById(any());
-        verifyNoInteractions(links);
+        // Check that deleteById was never subscribed
+        deleteProbe.assertWasNotSubscribed();
+
+        // storage.delete WAS subscribed
+        verify(storage).delete("gfs-1");
     }
 
     @Test
-    void delete_idempotency_decision_example_alreadyDeleted_returnsNotFound() {
-        // If you chose strict 404 on second call:
-        when(files.findById("gone")).thenReturn(Optional.empty());
+    void delete_idempotency_example_alreadyDeleted_returnsNotFound() {
+        when(files.findById("gone")).thenReturn(Mono.empty());
 
-        assertThatThrownBy(() -> service.delete("u1", "gone"))
+        assertThatThrownBy(() -> service.delete("u1", "gone").block())
                 .isInstanceOf(NotFoundException.class);
 
         verifyNoInteractions(storage, links);
     }
-
 }
+

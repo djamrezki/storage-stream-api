@@ -1,10 +1,10 @@
 package ae.teletronics.storage.application.dto;
 
-import ae.teletronics.storage.ports.StreamSource;
+import org.springframework.core.io.buffer.DataBuffer;
+import reactor.core.publisher.Flux;
 
 public record DownloadResult(
         String filename,
         String contentType,
-        long size,
-        StreamSource source
+        Flux<DataBuffer> body
 ) {}

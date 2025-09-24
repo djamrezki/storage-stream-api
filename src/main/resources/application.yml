@@ -6,13 +6,9 @@ spring:
     mongodb:
       uri: ${MONGODB_URI:mongodb://localhost:27017/storage}
       auto-index-creation: true
+  codec:
+    max-in-memory-size: 1MB
   servlet:
-    multipart:
-      # No hard limit required by the brief; set high to avoid surprises
-      max-file-size: 500GB
-      max-request-size: 500GB
+    http2: false
 
-storage:
-  base-path: ${STORAGE_PATH:/data/storage} # mount a volume here
-  base-url: /                              # download links must be relative per brief
-  fsync-on-write: false
+logging.level.reactor.netty: INFO
