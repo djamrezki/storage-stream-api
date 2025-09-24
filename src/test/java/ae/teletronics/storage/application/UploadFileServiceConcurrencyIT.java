@@ -122,28 +122,36 @@ class UploadFileServiceConcurrencyIT extends IntegrationTestBase {
         }
 
         // Determine surviving id
-        final String survivingId;
-        if (saveCount == 1) {
-            survivingId = storage.savedIds().get(0);
-        } else {
-            survivingId = (deleteCount == 1)
-                    ? (storage.savedIds().get(0).equals(storage.deletes().get(0))
-                    ? storage.savedIds().get(1) : storage.savedIds().get(0))
-                    : storage.savedIds().get(0); // unknown which failed; both saved, none deleted -> either may be winner
-        }
-
-        // Surviving blob exists
-        assertThat(storage.has(survivingId)).isTrue();
-
-        // DB has exactly one file for this owner/filename, with gridFsId == survivingId
+        // DB has exactly one file for this owner/filename
         var winners = files.findAllByOwnerId(owner, org.springframework.data.domain.PageRequest.of(0, 10), null)
                 .filter(fe -> filename.equals(fe.getFilename()))
                 .collectList().block();
         assertThat(winners).hasSize(1);
+
         FileEntry fe = winners.get(0);
         assertThat(fe.getOwnerId()).isEqualTo(owner);
         assertThat(fe.getFilename()).isEqualTo(filename);
-        assertThat(fe.getGridFsId()).isEqualTo(survivingId);
+
+// Winner is whatever the DB saved
+        final String survivingId = fe.getGridFsId();
+
+// Surviving blob exists in storage
+        assertThat(storage.has(survivingId)).isTrue();
+
+// Storage invariants for filename race:
+// - saves: 1 or 2
+// - deletes: 0 or 1
+// - if a delete happened, it must NOT delete the surviving id
+        saveCount = storage.savedIds().size();
+        deleteCount = storage.deletes().size();
+        assertThat(saveCount).isIn(1, 2);
+        assertThat(deleteCount).isIn(0, 1);
+        if (deleteCount == 1) {
+            String deletedId = storage.deletes().get(0);
+            assertThat(deletedId).isNotEqualTo(survivingId);
+            assertThat(storage.savedIds()).contains(deletedId);
+        }
+
     }
 
     @DisplayName("2) parallelUpload_sameContent -> one success, one DuplicateFileException (content), orphan cleaned")
