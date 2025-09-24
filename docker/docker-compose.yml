@@ -1,16 +1,18 @@
 services:
   storage:
-    image: djamrezki/storage-stream-api:latest
-    build: .
+    image: ghcr.io/djamrezki/storage-stream-api:latest
+    ports:
+      - "8080:8080"
     mem_limit: 1g
-    tmpfs:
-      - /tmp
+    tmpfs: ["/tmp"]
     environment:
       - SPRING_DATA_MONGODB_URI=mongodb://mongo:27017/storage
     depends_on: [mongo]
+
   mongo:
     image: mongo:7
     volumes:
       - mongo_data:/data/db
-  volumes:
-    mongo_data:
+
+volumes:
+  mongo_data:
