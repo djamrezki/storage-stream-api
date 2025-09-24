@@ -52,22 +52,37 @@ public class ReactiveFileController {
         this.storage = storage;
     }
 
-    // ---- Upload (multipart, auto-switch handled by service) ----
-    @PostMapping(path = "/files", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    @PostMapping(path = "/files",
+            consumes = MediaType.MULTIPART_FORM_DATA_VALUE,
+            produces = MediaType.APPLICATION_JSON_VALUE)
     public Mono<FileEntryDto> upload(@RequestHeader("X-User-Id") String ownerId,
                                      @RequestPart("file") FilePart file,
                                      @RequestPart(name = "filename", required = false) String filename,
                                      @RequestPart(name = "visibility", required = false) String visibilityStr,
-                                     @RequestPart(name = "tag", required = false) List<String> tags) {
+                                     @RequestPart(name = "tag", required = false) Flux<String> tagParts) {
 
-        final String effectiveFilename = Optional.ofNullable(filename).filter(s -> !s.isBlank()).orElse(file.filename());
+        final String effectiveFilename = Optional.ofNullable(filename).filter(s -> !s.isBlank())
+                .orElse(file.filename());
         final Visibility visibility = parseVisibility(visibilityStr).orElse(Visibility.PRIVATE);
-        final MediaType contentType = Optional.ofNullable(file.headers().getContentType()).orElse(MediaType.APPLICATION_OCTET_STREAM);
+        final MediaType contentType = Optional.ofNullable(file.headers().getContentType())
+                .orElse(MediaType.APPLICATION_OCTET_STREAM);
 
-        final List<String> safeTags = tags != null ? tags : List.of();
+        Mono<List<String>> tagsMono = (tagParts == null ? Flux.<String>empty() : tagParts)
+                .map(String::trim)
+                .filter(s -> !s.isBlank())
+                .distinct()
+                .collectList();
 
-        return uploadService.upload(ownerId, effectiveFilename, visibility, safeTags, contentType.toString(), file.content())
-                .flatMap(r -> files.findById(r.fileId()).map(FileEntryDto::from));
+        return tagsMono.flatMap(safeTags ->
+                uploadService.upload(
+                        ownerId,
+                        effectiveFilename,
+                        visibility,
+                        safeTags,
+                        contentType.toString(),
+                        file.content()
+                ).flatMap(r -> files.findById(r.fileId()).map(FileEntryDto::from))
+        );
     }
 
     private Optional<Visibility> parseVisibility(String raw) {
