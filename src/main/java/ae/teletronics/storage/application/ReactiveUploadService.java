@@ -9,9 +9,9 @@ import ae.teletronics.storage.ports.DownloadLinkQueryPort;
 import ae.teletronics.storage.ports.FileEntryQueryPort;
 import ae.teletronics.storage.ports.ReactiveStoragePort;
 import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Service;
-import org.springframework.dao.DuplicateKeyException; // <-- NEW
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.util.function.Tuple2;
@@ -39,10 +39,8 @@ public class ReactiveUploadService {
         this.storage = storage;
     }
 
-
-
     /**
-     * Streams upload to GridFS while hashing, then persists metadata and creates a download token.
+     * Streams upload to storage while hashing, then persists metadata and creates a download token.
      */
     public Mono<UploadFileResult> upload(String ownerId,
                                          String filename,
@@ -53,34 +51,38 @@ public class ReactiveUploadService {
 
         final String filenameLc = filename.toLowerCase(Locale.ROOT);
 
-
-
         // 1) Tee to compute SHA-256 + sniff head + size (no full buffering)
         Tuple2<Flux<DataBuffer>, Mono<Tuple2<String, SniffResult>>> tee =
                 teeWithSha256AndSniff(body, 16 * 1024); // 16 KB head
         Flux<DataBuffer> toStore = tee.getT1();
         Mono<Tuple2<String, SniffResult>> metaMono = tee.getT2();
 
-        // 2) Store immediately (streaming) while meta is computed in-flight
+        // 2) Store immediately (streaming). Cache to avoid double subscription.
         Mono<ReactiveStoragePort.StorageSaveResult> storeMono =
-                storage.save(toStore, filename, contentType, Map.of("ownerId", ownerId));
+                storage.save(toStore, filename, contentType, Map.of("ownerId", ownerId))
+                        .cache();
 
-        // 3) After store completes, combine results
-        return Mono.zip(storeMono, metaMono)   // let DB unique index decide the winner
+        // 3) IMPORTANT: finalize SHA/size AFTER storage has fully consumed the stream
+        Mono<Tuple2<String, SniffResult>> metaAfterStore = storeMono.then(metaMono);
+
+        // 4) Combine results (store result + finalized meta)
+        return storeMono.zipWith(metaAfterStore)
                 .flatMap(tuple -> {
                     ReactiveStoragePort.StorageSaveResult stored = tuple.getT1();
                     String sha256 = tuple.getT2().getT1();
                     SniffResult sniff = tuple.getT2().getT2();
 
-                    // Duplicate content check (owner-scoped)
+                    // Owner-scoped duplicate content check (fast path)
                     return files.existsByOwnerIdAndContentSha256(ownerId, sha256).flatMap(dup -> {
                         if (dup) {
-                            // Content duplicate detected early: cleanup blob and raise domain error
+                            // Content duplicate detected: cleanup blob and return domain error
                             return storage.delete(stored.gridFsId())
-                                    .then(Mono.error(new DuplicateFileException(DuplicateFileException.Kind.CONTENT, "File content already exists")));
+                                    .then(Mono.error(new DuplicateFileException(
+                                            DuplicateFileException.Kind.CONTENT,
+                                            "File content already exists")));
                         }
 
-                        // Decide final content type:
+                        // Decide final content type: prefer provided, else detected, else octet-stream
                         String provided = contentType;
                         String detected = detectContentType(sniff.head, filename);
                         String finalCt = isMeaningful(provided) ? provided
@@ -108,13 +110,17 @@ public class ReactiveUploadService {
                                     // content duplicate -> cleanup blob
                                     if (isDupOn(ex, "uniq_owner_sha256")) {
                                         return storage.delete(stored.gridFsId()).onErrorResume(e -> Mono.empty())
-                                                .then(Mono.error(new DuplicateFileException(DuplicateFileException.Kind.CONTENT,"File content already exists")));
+                                                .then(Mono.error(new DuplicateFileException(
+                                                        DuplicateFileException.Kind.CONTENT,
+                                                        "File content already exists")));
                                     }
                                     // filename duplicate -> keep blob (surviving blob kept)
                                     if (isDupOn(ex, "uniq_owner_filename")) {
-                                        return Mono.error(new DuplicateFileException(DuplicateFileException.Kind.FILENAME,"Filename already exists"));
+                                        return Mono.error(new DuplicateFileException(
+                                                DuplicateFileException.Kind.FILENAME,
+                                                "Filename already exists"));
                                     }
-                                    // unknown duplicate -> keep blob, bubble up
+                                    // unknown duplicate -> bubble up
                                     return Mono.error(ex);
                                 })
                                 .flatMap(saved -> {
@@ -125,12 +131,12 @@ public class ReactiveUploadService {
                                             null
                                     );
                                     return links.save(link)
-                                            .map(savedLink -> new UploadFileResult(saved.getId(), savedLink.getToken(), saved.getFilename()));
+                                            .map(savedLink -> new UploadFileResult(saved.getId(),
+                                                    savedLink.getToken(),
+                                                    saved.getFilename()));
                                 });
-
                     });
                 });
-
     }
 
     // --- helpers --------------------------------------------------------------
@@ -163,16 +169,14 @@ public class ReactiveUploadService {
     }
 
     private static List<String> normalizeTags(List<String> tags) {
-        if (tags == null) return java.util.List.of();
+        if (tags == null) return List.of();
         return tags.stream()
                 .filter(s -> s != null && !s.isBlank())
                 .map(s -> s.toLowerCase(Locale.ROOT).trim())
                 .toList();
     }
 
-    /**
-     * Returns (passthrough Flux, Mono<sha256>) computing sha while forwarding buffers.
-     */
+    /** Returns (passthrough Flux, Mono<sha256>) computing sha while forwarding buffers. */
     private static Tuple2<Flux<DataBuffer>, Mono<String>> teeWithSha256(Flux<DataBuffer> in) {
         final MessageDigest digest = newDigest();
         final AtomicLong size = new AtomicLong();
@@ -183,9 +187,8 @@ public class ReactiveUploadService {
             digest.update(nio);
         });
 
-        Mono<String> sha = Mono.defer(() -> Mono.fromSupplier(
-                () -> HexFormat.of().formatHex(digest.digest())
-        ));
+        // SHA value will be requested AFTER stream consumption by sequencing at call site
+        Mono<String> sha = Mono.fromSupplier(() -> HexFormat.of().formatHex(digest.digest()));
 
         return Tuples.of(out, sha);
     }
@@ -207,14 +210,13 @@ public class ReactiveUploadService {
         final int sniffLimit = Math.max(0, sniffBytes);
 
         Flux<DataBuffer> out = in.doOnNext(db -> {
-            // Hash without changing DataBuffer state
             ByteBuffer nio = db.asByteBuffer();
             size.addAndGet(nio.remaining());
-            digest.update(nio.duplicate()); // advances the duplicate's position, not the DataBuffer
+            digest.update(nio.duplicate()); // hash without mutating the DataBuffer
 
-            // Copy leading bytes for sniffing, without touching DataBuffer readPosition
+            // copy head bytes for sniffing
             if (headBuf.size() < sniffLimit) {
-                ByteBuffer slice = nio.slice(); // relative to current position
+                ByteBuffer slice = nio.slice();
                 int toCopy = Math.min(slice.remaining(), sniffLimit - headBuf.size());
                 if (toCopy > 0) {
                     slice.limit(toCopy);
@@ -225,10 +227,12 @@ public class ReactiveUploadService {
             }
         });
 
-        Mono<Tuple2<String, SniffResult>> meta = Mono.fromSupplier(() -> {
-            String sha = HexFormat.of().formatHex(digest.digest());
-            return Tuples.of(sha, new SniffResult(headBuf.toByteArray(), size.get()));
-        });
+        // Meta (sha + sniff) will be finalized AFTER storage consumption by sequencing at call site
+        Mono<Tuple2<String, SniffResult>> meta =
+                Mono.fromSupplier(() -> {
+                    String sha = HexFormat.of().formatHex(digest.digest());
+                    return Tuples.of(sha, new SniffResult(headBuf.toByteArray(), size.get()));
+                });
 
         return Tuples.of(out, meta);
     }
