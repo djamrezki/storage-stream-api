@@ -227,7 +227,7 @@ GET /download/{token}
 export MONGODB_URI="mongodb://localhost:27017/storage"
 export STORAGE_PATH="$(pwd)/data/storage"
 mkdir -p "$STORAGE_PATH"
-java -jar build/libs/storage-api-*.jar
+java -jar build/libs/storage-stream-api-*.jar
 ```
 
 ---
@@ -236,7 +236,7 @@ java -jar build/libs/storage-api-*.jar
 
 ### Build (multi-stage)
 ```bash
-docker build -t storage-api:0.1.0 -f docker/Dockerfile .
+docker build -t storage-stream-api:0.1.0 -f docker/Dockerfile .
 ```
 
 ### Run (enforcing the brief’s limits)
@@ -251,7 +251,7 @@ docker run --rm -p 8080:8080 \
   -v $(pwd)/data/storage:/data/storage \
   -e STORAGE_PATH=/data/storage \
   -e MONGODB_URI='mongodb://host.docker.internal:27017/storage' \
-  storage-api:0.1.0
+  storage-stream-api:0.1.0
 ```
 - `--read-only` and mounting `/data/storage` ensure the application layer stays ≤ 200 MB while user files live on a volume.
 
